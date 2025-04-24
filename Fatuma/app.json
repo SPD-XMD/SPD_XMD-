@@ -1,0 +1,12 @@
+{
+  "name": "whatsapp-bot",
+  "description": "WhatsApp Bot using Baileys",
+  "repository": "https://github.com/Fatuma-svg/Fatuma.git",
+  "keywords": ["node", "whatsapp", "bot"],
+  "env": {
+    "OWNER_NUMBER": {
+      "description": "Owner number for the bot",
+      "required": true
+    }
+  }
+}
