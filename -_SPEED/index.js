@@ -1,7 +1,5 @@
-const http = require("http");
-http.createServer((req, res) => res.end("Bot is alive")).listen(8080);
-
 const fs = require("fs");
+const path = require("path");
 const P = require("pino");
 const axios = require("axios");
 const cheerio = require("cheerio");
@@ -11,18 +9,13 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  makeInMemoryStore
+  makeCacheableSignalKeyStore
 } = require("@whiskeysockets/baileys");
 
-const PREFIX = "🙃";
-const OWNER_JID = "255654478605@s.whatsapp.net"; // badilisha na namba yako ya WhatsApp
+const OWNER_JID = "255654478605@s.whatsapp.net";
+const PREFIX = "!";
 
-const store = makeInMemoryStore({});
-store.readFromFile("./store.json");
-setInterval(() => store.writeToFile("./store.json"), 10_000);
-
-// Emoji reaction
+const antiLinkGroups = {};
 const emojiReactions = ["❤️", "😂", "🔥", "👍", "😎", "🤖"];
 const randomEmoji = () => emojiReactions[Math.floor(Math.random() * emojiReactions.length)];
 
@@ -32,111 +25,155 @@ async function startBot() {
 
   const sock = makeWASocket({
     version,
+    printQRInTerminal: true,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
+      keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" }))
     },
-    logger: P({ level: "silent" }),
-    printQRInTerminal: false,
-    browser: ["FatumaBot", "Safari", "1.0.0"],
-    getMessage: async () => ({ conversation: "Hello!" })
+    logger: P({ level: "silent" })
   });
 
-  store.bind(sock.ev);
   sock.ev.on("creds.update", saveCreds);
 
-  // PAIR CODE
-  if (!sock.authState.creds.registered) {
-    const code = await sock.requestPairingCode(OWNER_JID);
-    console.log(`PAIR CODE: ${code}`);
-  }
-
-  // Auto View Status
-  sock.ev.on("messages.update", async (msg) => {
-    for (let update of msg) {
-      if (update.messageStubType === 37) {
-        await sock.readMessages([update.key]);
-      }
-    }
-  });
-
-  // Welcome Message
-  sock.ev.on("group-participants.update", async (update) => {
-    if (update.action === "add") {
-      for (let user of update.participants) {
-        await sock.sendMessage(update.id, {
-          text: `Karibu sana @${user.split("@")[0]}!`,
-          mentions: [user]
-        });
-      }
-    }
-  });
-
-  // Message handler
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    let msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
-
-    const from = msg.key.remoteJid;
-    const type = Object.keys(msg.message)[0];
-    const body = msg.message.conversation || msg.message[type]?.caption || "";
-    const sender = msg.key.participant || msg.key.remoteJid;
-
-    // Fake presence
-    await sock.sendPresenceUpdate("recording", from);
-    await new Promise(r => setTimeout(r, 5000));
-
-    // React with emoji
-    await sock.sendMessage(from, {
-      react: { text: randomEmoji(), key: msg.key }
-    });
-
-    // View Once opener
-    if (msg.message?.viewOnceMessageV2) {
-      const viewOnce = msg.message.viewOnceMessageV2.message;
-      await sock.sendMessage(from, viewOnce, { quoted: msg });
-    }
-
-    // Anti-link
-    if (body.match(/https:\/\/chat\.whatsapp\.com\//)) {
-      if (!msg.key.fromMe && !sender.includes(OWNER_JID)) {
-        await sock.sendMessage(from, { text: "Link za group haziruhusiwi!" });
-        await sock.groupParticipantsUpdate(from, [sender], "remove");
-      }
-    }
-
-    // Commands
-    if (body.startsWith(PREFIX)) {
-      const cmd = body.slice(1).trim().split(" ")[0].toLowerCase();
-      switch (cmd) {
-        case "ping":
-          await sock.sendMessage(from, { text: "🏓 Pong!" });
-          break;
-        case "menu":
-          await sock.sendMessage(from, {
-            text: `*🙃 Fatuma Bot Menu*\n\n` +
-                  `🙃ping - Check bot status\n` +
-                  `🙃menu - Show this menu\n\n` +
-                  `Zaidi zinakuja...`
-          });
-          break;
-        default:
-          await sock.sendMessage(from, { text: "Command haipo!" });
-      }
-    }
-  });
-
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
     if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log("Connection closed, reconnecting:", shouldReconnect);
+      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) startBot();
     } else if (connection === "open") {
       console.log("✅ Bot connected!");
+
+      const menu = `
+🔰 *WELCOME TO BEN WHITTAKER TECH BOT* 🔰
+
+✅ *Bot is now online and connected successfully!*
+
+🔧 *Prefix:* ${PREFIX}
+🤖 *Bot Name:* BEN WHITTAKER TECH
+👑 *Owner:* @${OWNER_JID.split("@")[0]}
+
+ℹ️ Type *${PREFIX}menu* or *${PREFIX}help* to see available commands.
+
+📌 *Need assistance?* Just type *${PREFIX}support*.
+      `;
+
+      await sock.sendMessage(OWNER_JID, {
+        text: menu
+      });
     }
   });
-}
 
-startBot().catch((err) => console.error("Bot start error:", err));
+  // Load commands from commands/
+  const commands = new Map();
+  const commandsPath = path.join(__dirname, "commands");
+  if (fs.existsSync(commandsPath)) {
+    for (const file of fs.readdirSync(commandsPath).filter(f => f.endsWith(".js"))) {
+      const cmd = require(path.join(commandsPath, file));
+      if (cmd.name) commands.set(cmd.name.toLowerCase(), cmd);
+    }
+  } else {
+    fs.mkdirSync(commandsPath);
+    console.log("Created commands folder.");
+  }
+
+  // Listen for incoming messages
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message) return;
+
+    const from = msg.key.remoteJid;
+    const isGroup = from.endsWith("@g.us");
+    const sender = msg.key.participant || msg.key.remoteJid;
+    const body = msg.message?.conversation ||
+                msg.message?.extendedTextMessage?.text ||
+                msg.message?.imageMessage?.caption || "";
+
+    // FAKE RECORDING PRESENCE
+    await sock.sendPresenceUpdate("recording", from);
+    setTimeout(() => {
+      sock.sendPresenceUpdate("available", from);
+    }, 5000);
+
+    // ANTI-LINK FEATURE
+    if (isGroup && body.toLowerCase().startsWith(PREFIX + "antlink")) {
+      const args = body.trim().split(" ");
+      const sub = args[1]?.toLowerCase();
+      const option = args[2]?.toLowerCase();
+      antiLinkGroups[from] = antiLinkGroups[from] || { enabled: false, action: "remove" };
+
+      if (sub === "on") {
+        antiLinkGroups[from].enabled = true;
+        await sock.sendMessage(from, {
+          text: "✅ Anti-Link is now *ON*.",
+          react: { text: "🛡️", key: msg.key }
+        });
+      } else if (sub === "off") {
+        antiLinkGroups[from].enabled = false;
+        await sock.sendMessage(from, {
+          text: "❌ Anti-Link is now *OFF*.",
+          react: { text: "🚫", key: msg.key }
+        });
+      } else if (sub === "action" && ["remove", "warn"].includes(option)) {
+        antiLinkGroups[from].action = option;
+        await sock.sendMessage(from, {
+          text: `⚙️ Action set to *${option}*`,
+          react: { text: "⚠️", key: msg.key }
+        });
+      } else {
+        await sock.sendMessage(from, {
+          text: `🛡️ Use:\n${PREFIX}antlink on\n${PREFIX}antlink off\n${PREFIX}antlink action remove|warn`,
+          react: { text: "ℹ️", key: msg.key }
+        });
+      }
+    }
+
+    if (isGroup && antiLinkGroups[from]?.enabled) {
+      const linkRegex = /https?:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]{20,}/;
+      const action = antiLinkGroups[from].action;
+
+      if (linkRegex.test(body) && sender !== OWNER_JID) {
+        try {
+          const metadata = await sock.groupMetadata(from);
+          const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+          const botAdmin = metadata.participants.find(p => p.id === botNumber)?.admin;
+
+          if (!botAdmin) {
+            await sock.sendMessage(from, {
+              text: "⚠️ I'm not admin, can't perform action."
+            });
+            return;
+          }
+
+          if (action === "warn") {
+            await sock.sendMessage(from, {
+              text: `⚠️ *@${sender.split("@")[0]}*, link sharing not allowed!`,
+              mentions: [sender]
+            });
+          } else if (action === "remove") {
+            await sock.sendMessage(from, {
+              text: `🚫 *@${sender.split("@")[0]}* removed for sharing link.`,
+              mentions: [sender]
+            });
+            await sock.groupParticipantsUpdate(from, [sender], "remove");
+          }
+        } catch (err) {
+          console.error("Anti-Link Error:", err);
+        }
+      }
+    }
+
+    // Command execution
+    for (const [name, command] of commands) {
+      if (body.toLowerCase().startsWith(PREFIX + name)) {
+        try {
+          const args = body.trim().split(/\s+/).slice(1);
+          await command.execute(sock, msg, args);
+        } catch (err) {
+          console.error(`Error executing command ${name}:`, err);
+        }
+        break;
+      }
+    }
+  }); // end of sock.ev.on("messages.upsert")
+} // end of startBot()
+
+startBot();
